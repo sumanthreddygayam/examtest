@@ -311,7 +311,7 @@ def ranked_entities(counts: Counter[str], max_entities: int) -> List[str]:
     return selected
 
 
-def extract_entities(text: str, max_entities: int = 10) -> List[str]:
+def extract_entities(text: str, max_entities: int = 100) -> List[str]:
     counts: Counter[str] = Counter()
     aliases = build_acronym_aliases(text)
     extract_spacy_entities(text, counts, aliases)
