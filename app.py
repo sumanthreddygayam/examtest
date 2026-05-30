@@ -1,9 +1,12 @@
 import io
 import json
 import os
+import pickle
 import re
+import hashlib
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
 import networkx as nx
@@ -26,6 +29,10 @@ DEFAULT_MODEL = "mistral-small-latest"
 MAX_VISUAL_NODES = 55
 MAX_CONTEXT_CHUNKS = 100
 MAX_CONTEXT_CHARS = 24000
+MAX_ENTITIES_PER_CHUNK = 25
+MAX_SENTENCE_ENTITIES = 8
+PROCESSING_CACHE_VERSION = "spacy-hybrid-v3"
+CACHE_DIR = Path(".cache")
 SPACY_MODEL = "en_core_web_sm"
 NER_LABELS = {
     "EVENT",
@@ -158,8 +165,39 @@ def get_api_key() -> str:
         return os.getenv("MISTRAL_API_KEY", "")
 
 
-def extract_pdf_text(uploaded_file) -> List[Tuple[int, str]]:
-    reader = PdfReader(io.BytesIO(uploaded_file.getvalue()))
+def uploaded_file_bytes(uploaded_file) -> bytes:
+    return uploaded_file.getvalue()
+
+
+def file_signature(uploaded_file, file_bytes: bytes) -> str:
+    digest = hashlib.sha256(file_bytes).hexdigest()
+    return f"{PROCESSING_CACHE_VERSION}:{uploaded_file.name}:{uploaded_file.size}:{digest}"
+
+
+def cache_path(signature: str) -> Path:
+    digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+    return CACHE_DIR / f"{digest}.pkl"
+
+
+def load_processed_cache(signature: str):
+    path = cache_path(signature)
+    if not path.exists():
+        return None
+    try:
+        with path.open("rb") as cache_file:
+            return pickle.load(cache_file)
+    except Exception:
+        return None
+
+
+def save_processed_cache(signature: str, rag_state: dict) -> None:
+    CACHE_DIR.mkdir(exist_ok=True)
+    with cache_path(signature).open("wb") as cache_file:
+        pickle.dump(rag_state, cache_file)
+
+
+def extract_pdf_text(file_bytes: bytes) -> List[Tuple[int, str]]:
+    reader = PdfReader(io.BytesIO(file_bytes))
     pages = []
     for page_number, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
@@ -311,7 +349,7 @@ def ranked_entities(counts: Counter[str], max_entities: int) -> List[str]:
     return selected
 
 
-def extract_entities(text: str, max_entities: int = 100) -> List[str]:
+def extract_entities(text: str, max_entities: int = MAX_ENTITIES_PER_CHUNK) -> List[str]:
     counts: Counter[str] = Counter()
     aliases = build_acronym_aliases(text)
     extract_spacy_entities(text, counts, aliases)
@@ -361,6 +399,7 @@ def build_graph(chunks: List[Chunk]) -> nx.Graph:
 
         for sentence in sentence_split(chunk.text):
             sentence_entities = [entity for entity in entities if entity.lower() in sentence.lower()]
+            sentence_entities = sentence_entities[:MAX_SENTENCE_ENTITIES]
             for index, left in enumerate(sentence_entities):
                 for right in sentence_entities[index + 1 :]:
                     relation = infer_relation(sentence, left, right)
@@ -1008,8 +1047,8 @@ def render_graph_summary(graph: nx.Graph, communities: List[List[str]], chunks: 
         st.dataframe(pd.DataFrame(community_rows), use_container_width=True, hide_index=True)
 
 
-def process_pdf(uploaded_file):
-    pages = extract_pdf_text(uploaded_file)
+def process_pdf(uploaded_file, file_bytes: bytes):
+    pages = extract_pdf_text(file_bytes)
     chunks = chunk_pages(pages)
     graph = build_graph(chunks)
     communities = detect_communities(graph)
@@ -1044,11 +1083,27 @@ def main() -> None:
         st.info("Upload a PDF to build the knowledge graph and start generating exam tests.")
         return
 
-    file_signature = f"{uploaded_file.name}:{uploaded_file.size}"
-    if st.session_state.get("file_signature") != file_signature:
-        with st.spinner("Reading PDF and building the graph..."):
-            st.session_state["rag_state"] = process_pdf(uploaded_file)
-            st.session_state["file_signature"] = file_signature
+    file_bytes = uploaded_file_bytes(uploaded_file)
+    signature = file_signature(uploaded_file, file_bytes)
+    if st.session_state.get("file_signature") != signature:
+        cached_state = load_processed_cache(signature)
+        if cached_state is not None:
+            st.session_state["rag_state"] = cached_state
+            st.session_state["file_signature"] = signature
+            st.success("Loaded the existing graph cache for this PDF.")
+        else:
+            st.warning(
+                "This PDF has not been indexed yet. Large PDFs can take a long time, and cache is saved only after indexing finishes."
+            )
+            if not st.button("Build graph cache", type="primary"):
+                st.info("Click Build graph cache when you are ready. Reopening the app will not auto-start the long indexing job.")
+                return
+            with st.spinner("Reading PDF and building the graph. Keep this tab open until indexing finishes..."):
+                rag_state = process_pdf(uploaded_file, file_bytes)
+                save_processed_cache(signature, rag_state)
+                st.session_state["rag_state"] = rag_state
+                st.session_state["file_signature"] = signature
+                st.success("Graph cache saved. Future opens of this PDF should load faster.")
 
     rag_state = st.session_state["rag_state"]
     chunks: List[Chunk] = rag_state["chunks"]
