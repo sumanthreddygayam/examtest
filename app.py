@@ -1026,8 +1026,8 @@ def process_pdf(uploaded_file):
 
 
 def main() -> None:
-    st.set_page_config(page_title="GraphRAG Exam Test Builder", page_icon="G", layout="wide")
-    st.title("GraphRAG Exam Test Builder")
+    st.set_page_config(page_title="Exam Test Builder", page_icon="G", layout="wide")
+    st.title("Exam Test Builder")
     st.caption("Upload a PDF, build a concept graph, ask questions, and generate exam tests with Mistral AI.")
 
     with st.sidebar:
