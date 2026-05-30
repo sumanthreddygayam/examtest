@@ -16,6 +16,7 @@ Streamlit app for uploading study PDFs, building a lightweight knowledge graph, 
 
 ```bash
 pip install -r requirements.txt
+python -m spacy download en_core_web_sm
 streamlit run app.py
 ```
 
@@ -52,7 +53,7 @@ Do not commit `.streamlit/secrets.toml`. Use Streamlit Cloud app settings for se
 During upload:
 
 ```text
-PDF -> text extraction -> chunks -> entities -> relations -> knowledge graph -> communities -> embeddings/vectors
+PDF -> text extraction -> chunks -> spaCy entities/noun phrases -> co-occurrence relations -> knowledge graph -> communities -> embeddings/vectors
 ```
 
 During question answering:
@@ -62,3 +63,5 @@ question -> entity detection -> community retrieval -> graph traversal -> chunk 
 ```
 
 This keeps retrieval focused on concept relationships, not only keyword or vector similarity.
+
+Entity extraction uses a FastGraphRAG-style traditional NLP path: spaCy named entities such as PERSON, ORG, and GPE plus noun phrases are indexed locally. If spaCy or `en_core_web_sm` is unavailable, the app falls back to the lightweight regex extractor so uploads still work.

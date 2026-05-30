@@ -15,16 +15,61 @@ from PyPDF2 import PdfReader
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+try:
+    import spacy
+except ImportError:
+    spacy = None
+
 
 MISTRAL_CHAT_URL = "https://api.mistral.ai/v1/chat/completions"
 DEFAULT_MODEL = "mistral-small-latest"
 MAX_VISUAL_NODES = 55
 MAX_CONTEXT_CHUNKS = 35
 MAX_CONTEXT_CHARS = 24000
+SPACY_MODEL = "en_core_web_sm"
+NER_LABELS = {
+    "EVENT",
+    "FAC",
+    "GPE",
+    "LANGUAGE",
+    "LAW",
+    "LOC",
+    "NORP",
+    "ORG",
+    "PERSON",
+    "PRODUCT",
+    "WORK_OF_ART",
+}
+GENERIC_ENTITY_WORDS = {
+    "answer",
+    "chapter",
+    "concept",
+    "data",
+    "diagram",
+    "example",
+    "figure",
+    "information",
+    "material",
+    "method",
+    "note",
+    "page",
+    "process",
+    "question",
+    "section",
+    "step",
+    "system",
+    "table",
+    "text",
+    "thing",
+    "type",
+    "value",
+    "way",
+}
 STOPWORDS = {
     "a",
     "an",
     "and",
+    "any",
     "are",
     "as",
     "at",
@@ -40,14 +85,41 @@ STOPWORDS = {
     "into",
     "is",
     "it",
+    "its",
+    "like",
+    "many",
+    "more",
+    "most",
+    "not",
     "of",
     "on",
     "or",
+    "other",
     "that",
     "the",
     "their",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
     "this",
+    "those",
     "to",
+    "converts",
+    "convert",
+    "contains",
+    "contain",
+    "depends",
+    "include",
+    "includes",
+    "including",
+    "requires",
+    "require",
+    "retrieves",
+    "retrieve",
+    "stores",
+    "store",
     "uses",
     "use",
     "used",
@@ -60,6 +132,16 @@ STOPWORDS = {
     "why",
     "with",
 }
+
+
+@st.cache_resource(show_spinner=False)
+def load_nlp_model():
+    if spacy is None:
+        return None
+    try:
+        return spacy.load(SPACY_MODEL)
+    except OSError:
+        return None
 
 
 @dataclass
@@ -114,26 +196,128 @@ def chunk_pages(pages: List[Tuple[int, str]], max_words: int = 95) -> List[Chunk
 
 def normalize_entity(entity: str) -> str:
     entity = re.sub(r"\s+", " ", entity).strip(" .,:;!?()[]{}")
-    return entity.title()
+    words = []
+    for word in entity.split():
+        if word.isupper() or any(character.isdigit() for character in word):
+            words.append(word)
+        else:
+            words.append(word[:1].upper() + word[1:].lower())
+    return " ".join(words)
+
+
+def build_acronym_aliases(text: str) -> Dict[str, str]:
+    aliases = {}
+    pattern = r"\b([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,5})\s*\(([A-Z][A-Z0-9]{1,9})\)"
+    for long_form, acronym in re.findall(pattern, text):
+        initials = "".join(word[0] for word in long_form.split() if word)
+        if initials.upper() == acronym.upper():
+            aliases[acronym.upper()] = normalize_entity(long_form)
+    return aliases
+
+
+def candidate_words(entity: str) -> List[str]:
+    return [word for word in re.findall(r"[A-Za-z0-9+\-]+", entity) if word.lower() not in STOPWORDS]
+
+
+def is_useful_entity(entity: str) -> bool:
+    words = candidate_words(entity)
+    if not words:
+        return False
+    if len(words) == 1 and len(words[0]) < 4:
+        return False
+    lowered = {word.lower() for word in words}
+    if lowered.issubset(GENERIC_ENTITY_WORDS):
+        return False
+    if len(words) > 1 and len(lowered - GENERIC_ENTITY_WORDS) == 0:
+        return False
+    if all(word.isdigit() for word in words):
+        return False
+    return True
+
+
+def count_entity_candidate(
+    counts: Counter[str],
+    candidate: str,
+    aliases: Dict[str, str],
+    weight: int = 1,
+) -> None:
+    if not is_useful_entity(candidate):
+        return
+    words = candidate_words(candidate)
+    entity = normalize_entity(" ".join(words[:4]))
+    entity = aliases.get(entity.upper(), entity)
+    if entity:
+        counts[entity] += weight
+
+
+def extract_regex_entities(text: str, counts: Counter[str], aliases: Dict[str, str]) -> None:
+    capitalized = re.findall(r"\b(?:[A-Z][A-Za-z0-9+\-]*)(?:\s+[A-Z][A-Za-z0-9+\-]*)*\b", text)
+    technical_terms = re.findall(r"\b[a-zA-Z][a-zA-Z0-9+\-]{3,}(?:\s+[a-zA-Z][a-zA-Z0-9+\-]{3,}){0,2}\b", text)
+    for candidate in capitalized:
+        count_entity_candidate(counts, candidate, aliases, weight=2)
+    for candidate in technical_terms:
+        count_entity_candidate(counts, candidate, aliases)
+
+
+def noun_chunk_candidate(chunk) -> str:
+    tokens = [
+        token.text
+        for token in chunk
+        if not token.is_stop
+        and not token.is_punct
+        and not token.is_space
+        and token.pos_ in {"ADJ", "NOUN", "PROPN", "NUM"}
+    ]
+    if not any(token.pos_ in {"NOUN", "PROPN"} for token in chunk):
+        return ""
+    return " ".join(tokens)
+
+
+def extract_spacy_entities(text: str, counts: Counter[str], aliases: Dict[str, str]) -> bool:
+    nlp = load_nlp_model()
+    if nlp is None:
+        return False
+
+    doc = nlp(text)
+    for entity in doc.ents:
+        if entity.label_ in NER_LABELS:
+            count_entity_candidate(counts, entity.text, aliases, weight=4)
+
+    if doc.has_annotation("DEP"):
+        for chunk in doc.noun_chunks:
+            candidate = noun_chunk_candidate(chunk)
+            if candidate:
+                count_entity_candidate(counts, candidate, aliases)
+    return True
+
+
+def entity_terms(entity: str) -> set:
+    return {term.lower() for term in re.findall(r"[A-Za-z0-9+\-]+", entity)}
+
+
+def ranked_entities(counts: Counter[str], max_entities: int) -> List[str]:
+    selected: List[str] = []
+    selected_terms: List[set] = []
+    for entity, _ in counts.most_common():
+        terms = entity_terms(entity)
+        if any(terms < existing_terms for existing_terms in selected_terms):
+            continue
+        if any(entity.lower() in existing.lower() and len(entity) < len(existing) for existing in selected):
+            continue
+        selected.append(entity)
+        selected_terms.append(terms)
+        if len(selected) >= max_entities:
+            break
+    return selected
 
 
 def extract_entities(text: str, max_entities: int = 10) -> List[str]:
-    capitalized = re.findall(r"\b(?:[A-Z][A-Za-z0-9+\-]*)(?:\s+[A-Z][A-Za-z0-9+\-]*)*\b", text)
-    technical_terms = re.findall(r"\b[a-zA-Z][a-zA-Z0-9+\-]{3,}(?:\s+[a-zA-Z][a-zA-Z0-9+\-]{3,}){0,2}\b", text)
-    candidates = capitalized + technical_terms
     counts: Counter[str] = Counter()
+    aliases = build_acronym_aliases(text)
+    extract_spacy_entities(text, counts, aliases)
+    extract_regex_entities(text, counts, aliases)
 
-    for candidate in candidates:
-        words = [word for word in re.findall(r"[A-Za-z0-9+\-]+", candidate) if word.lower() not in STOPWORDS]
-        if not words:
-            continue
-        if len(words) == 1 and len(words[0]) < 4:
-            continue
-        entity = normalize_entity(" ".join(words[:3]))
-        if entity:
-            counts[entity] += 1
-
-    return [entity for entity, _ in counts.most_common(max_entities)]
+    return ranked_entities(counts, max_entities)
 
 
 def infer_relation(sentence: str, left: str, right: str) -> str:
