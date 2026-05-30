@@ -460,7 +460,7 @@ def retrieve_context(query: str, chunks: List[Chunk], graph: nx.Graph, communiti
 
 def mistral_chat(messages: List[Dict[str, str]], api_key: str, model: str, temperature: float = 0.2) -> str:
     if not api_key:
-        return "The LLM is not configured yet. Please check the deployment settings."
+        return "The AI service is temporarily unavailable. Please try again later."
 
     response = requests.post(
         MISTRAL_CHAT_URL,
@@ -847,11 +847,10 @@ def main() -> None:
     st.caption("Upload a PDF, build a concept graph, ask questions, and generate exam tests with Mistral AI.")
 
     with st.sidebar:
-        st.header("Settings")
-        model = st.text_input("Mistral model", value=DEFAULT_MODEL)
+        st.header("GraphRAG Flow")
+        model = DEFAULT_MODEL
         api_key = get_api_key()
         st.divider()
-        st.markdown("**Pipeline**")
         st.markdown(
             "PDF upload -> text extraction -> chunking -> entity/relation extraction -> graph communities -> graph + vector retrieval -> Mistral answer."
         )
