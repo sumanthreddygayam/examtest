@@ -24,7 +24,7 @@ except ImportError:
 MISTRAL_CHAT_URL = "https://api.mistral.ai/v1/chat/completions"
 DEFAULT_MODEL = "mistral-small-latest"
 MAX_VISUAL_NODES = 55
-MAX_CONTEXT_CHUNKS = 35
+MAX_CONTEXT_CHUNKS = 70
 MAX_CONTEXT_CHARS = 24000
 SPACY_MODEL = "en_core_web_sm"
 NER_LABELS = {
