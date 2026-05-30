@@ -69,9 +69,7 @@ class Chunk:
     page: int
 
 
-def get_api_key(typed_api_key: str = "") -> str:
-    if typed_api_key.strip():
-        return typed_api_key.strip()
+def get_api_key() -> str:
     try:
         return st.secrets["MISTRAL_API_KEY"]
     except Exception:
@@ -462,7 +460,7 @@ def retrieve_context(query: str, chunks: List[Chunk], graph: nx.Graph, communiti
 
 def mistral_chat(messages: List[Dict[str, str]], api_key: str, model: str, temperature: float = 0.2) -> str:
     if not api_key:
-        return "Add your MISTRAL_API_KEY in Streamlit secrets or your local environment to use the LLM."
+        return "The LLM is not configured yet. Please check the deployment settings."
 
     response = requests.post(
         MISTRAL_CHAT_URL,
@@ -851,16 +849,7 @@ def main() -> None:
     with st.sidebar:
         st.header("Settings")
         model = st.text_input("Mistral model", value=DEFAULT_MODEL)
-        typed_api_key = st.text_input(
-            "Mistral API key",
-            type="password",
-            placeholder="Paste key for local testing",
-        )
-        api_key = get_api_key(typed_api_key)
-        if api_key:
-            st.success("Mistral API key loaded")
-        else:
-            st.warning("Set MISTRAL_API_KEY or paste a key above to enable answers and exam generation")
+        api_key = get_api_key()
         st.divider()
         st.markdown("**Pipeline**")
         st.markdown(
